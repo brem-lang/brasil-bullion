@@ -33,3 +33,4 @@ dist-ssr
 
 # Server secrets (CRM_WEBHOOK_URL)
 .env
+.output.prev-*
