@@ -20,6 +20,7 @@ const lead = {
   consent: true,
   utm: { utm_source: "meta", utm_campaign: "ouro-30" },
   clickId: "abc_123",
+  fillMs: 45_000,
 };
 
 const config: CrmConfig = {
@@ -98,6 +99,8 @@ describe("handleSubmitLead", () => {
       { key: "goal", value: expect.any(String) },
       { key: "deposit_250", value: expect.any(String) },
       { key: "consent_contact_lgpd", value: "yes" },
+      { key: "is_bot", value: "false" },
+      { key: "suspected_bot", value: "none" },
     ]);
   });
 
@@ -144,11 +147,37 @@ describe("handleSubmitLead", () => {
     expect(await res.json()).toMatchObject({ field: "phone", error: "DDD inválido" });
   });
 
-  it("drops honeypot leads but answers success", async () => {
-    const crm = crmReplies(201, { success: true });
-    const res = await send(post({ ...lead, website: "spam.example" }), crm);
-    expect(res.status).toBe(200);
-    expect(crm).not.toHaveBeenCalled();
+  const botFlags = async (body: unknown, headers: Record<string, string> = {}) => {
+    const crm = crmReplies(201, { success: true, data: {} });
+    expect((await send(post(body, headers), crm)).status).toBe(200);
+    const questions = JSON.parse(crm.mock.calls[0]![1]!.body as string).questions as {
+      key: string;
+      value: string;
+    }[];
+    return Object.fromEntries(
+      questions.filter((q) => q.key.endsWith("bot")).map((q) => [q.key, q.value]),
+    );
+  };
+
+  it("sends suspicious leads to the CRM flagged is_bot with the reasons", async () => {
+    expect(await botFlags({ ...lead, website: "spam.example" })).toEqual({
+      is_bot: "true",
+      suspected_bot: "honeypot",
+    });
+    expect(await botFlags({ ...lead, fillMs: 1200 }, { "cf-ipcountry": "US" })).toEqual({
+      is_bot: "true",
+      suspected_bot: "fast_submit,non_br_country",
+    });
+    const { fillMs: _omit, ...noTiming } = lead;
+    expect(await botFlags(noTiming)).toEqual({ is_bot: "true", suspected_bot: "no_fill_time" });
+  });
+
+  it("does not flag Brazilian or unknown-country visitors", async () => {
+    for (const cc of ["BR", "br", "XX"])
+      expect(await botFlags(lead, { "cf-ipcountry": cc })).toEqual({
+        is_bot: "false",
+        suspected_bot: "none",
+      });
   });
 
   it("rate-limits per IP", async () => {
@@ -221,10 +250,13 @@ describe("handleSubmitLead", () => {
     expect(crm).not.toHaveBeenCalled();
   });
 
-  it("drops honeypot leads before the captcha check", async () => {
-    const captcha = vi.fn(captchaOk);
-    const res = await send(post({ ...lead, website: "spam.example" }), undefined, config, captcha);
-    expect(res.status).toBe(200);
-    expect(captcha).not.toHaveBeenCalled();
+  it("still requires the captcha for honeypot leads", async () => {
+    const crm = crmReplies(201, { success: true });
+    const res = await send(post({ ...lead, website: "spam.example" }), crm, config, async () => ({
+      ok: false,
+      reason: "missing",
+    }));
+    expect(res.status).toBe(403);
+    expect(crm).not.toHaveBeenCalled();
   });
 });

@@ -49,8 +49,10 @@ export const leadSchema = z.object({
   consent: z.literal(true, { errorMap: () => ({ message: "Aceite os termos para continuar" }) }),
   utm: z.record(z.string().max(200)).optional(),
   clickId: z.string().max(128).optional(),
-  // Honeypot: hidden field real visitors never fill.
+  // Honeypot: hidden field real visitors never fill. Filled leads are flagged is_bot.
   website: z.string().max(200).optional(),
+  // Milliseconds from the form appearing to submit; very fast submits are flagged is_bot.
+  fillMs: z.number().int().min(0).optional(),
   // Cloudflare Turnstile token; the server rejects the lead without a valid one.
   captchaToken: z.string().max(2048).optional(),
 });

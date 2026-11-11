@@ -24,6 +24,26 @@ const MAX_BODY_BYTES = 8_192;
 const CRM_TIMEOUT_MS = 15_000;
 const OFFER_NAME = "brasil-bullion";
 const CLICK_ID_RE = /^[A-Za-z0-9._-]{1,128}$/;
+/** Filling 3 contact fields and 3 questions takes a person well over this. */
+export const MIN_FILL_MS = 3_000;
+
+/** Signs a lead may be a bot. These leads still go to the CRM, flagged with is_bot. */
+export type BotReason = "honeypot" | "fast_submit" | "no_fill_time" | "non_br_country";
+
+/**
+ * Likely-bot signals. Certain ones (no valid captcha) are rejected before this runs.
+ * fillMs comes from the browser, so a bot can fake it; it still catches careless ones.
+ * country is Cloudflare's CF-IPCountry ("XX" = unknown, "T1" = Tor).
+ */
+export function botReasons(lead: Lead, country?: string | null): BotReason[] {
+  const reasons: BotReason[] = [];
+  if (lead.website) reasons.push("honeypot");
+  if (lead.fillMs === undefined) reasons.push("no_fill_time");
+  else if (lead.fillMs < MIN_FILL_MS) reasons.push("fast_submit");
+  const cc = country?.trim().toUpperCase();
+  if (cc && cc !== "BR" && cc !== "XX") reasons.push("non_br_country");
+  return reasons;
+}
 
 const FORM_FIELDS: readonly string[] = [
   "firstName",
@@ -79,7 +99,13 @@ function json(status: number, body: Record<string, unknown>): Response {
 const label = (opts: readonly { value: string; label: string }[], v: string) =>
   opts.find((o) => o.value === v)?.label ?? v;
 
-export function toCrmPayload(lead: Lead, ipAddress: string, config: CrmConfig, userAgent?: string) {
+export function toCrmPayload(
+  lead: Lead,
+  ipAddress: string,
+  config: CrmConfig,
+  userAgent?: string,
+  reasons: readonly BotReason[] = [],
+) {
   const phone = checkBrMobile(lead.phone);
   const score = scoreLead(lead);
   const utm = lead.utm ?? {};
@@ -100,7 +126,7 @@ export function toCrmPayload(lead: Lead, ipAddress: string, config: CrmConfig, u
     custom2: utm["utm_campaign"],
     custom3: score,
     click_ua: userAgent?.slice(0, 500),
-    // Only the five form questions; score and UTMs already go in custom1–3.
+    // The five form questions, then the bot flag; score and UTMs already go in custom1–3.
     // The schema requires over30 and consent to be true, so both are always "yes".
     questions: [
       { key: "age_30_plus", value: "yes" },
@@ -108,6 +134,8 @@ export function toCrmPayload(lead: Lead, ipAddress: string, config: CrmConfig, u
       { key: "goal", value: label(goalOptions, lead.goal) },
       { key: "deposit_250", value: label(depositOptions, lead.deposit) },
       { key: "consent_contact_lgpd", value: "yes" },
+      { key: "is_bot", value: reasons.length > 0 ? "true" : "false" },
+      { key: "suspected_bot", value: reasons.join(",") || "none" },
     ],
   };
 }
@@ -222,12 +250,6 @@ export async function handleSubmitLead(
   }
   const lead = parsed.data;
 
-  // Bots fill the hidden field: answer success so they don't retry, send nothing.
-  if (lead.website) {
-    console.warn("lead submit: rejected reason=honeypot (dropped, answered success)");
-    return json(200, { success: true });
-  }
-
   if (!config.endpoint || !config.apiKey) {
     console.error("lead submit: BASE_ENDPOINT or BASE_API_KEY is not set");
     return json(503, { success: false });
@@ -261,9 +283,17 @@ export async function handleSubmitLead(
     });
   }
 
-  const payload = toCrmPayload(lead, ip, config, request.headers.get("user-agent") ?? undefined);
+  // Suspicious but not certain: send to the CRM flagged, so no real lead is lost.
+  const reasons = botReasons(lead, request.headers.get("cf-ipcountry"));
+  const payload = toCrmPayload(
+    lead,
+    ip,
+    config,
+    request.headers.get("user-agent") ?? undefined,
+    reasons,
+  );
   // One log line per lead: no key, no personal data.
-  const sent = `score=${payload.custom3} click_id=${payload.click_id ?? "-"}`;
+  const sent = `score=${payload.custom3} click_id=${payload.click_id ?? "-"} is_bot=${reasons.length > 0} suspected_bot=${reasons.join(",") || "none"}`;
   try {
     const res = await fetchImpl(config.endpoint, {
       method: "POST",
