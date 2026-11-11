@@ -6,6 +6,7 @@ import {
   type CrmConfig,
 } from "@/lib/lead-proxy.server";
 import { resetRateLimit } from "@/lib/rate-limit";
+import type { CaptchaResult } from "@/lib/turnstile.server";
 
 const lead = {
   firstName: "José",
@@ -26,6 +27,7 @@ const config: CrmConfig = {
   apiKey: "secret-key",
 };
 const mailOk = async () => true;
+const captchaOk = async (_token?: string, _ip?: string): Promise<CaptchaResult> => ({ ok: true });
 
 function post(body: unknown, headers: Record<string, string> = {}) {
   return new Request("https://brasil.example/api/submit-lead", {
@@ -46,7 +48,8 @@ const send = (
   req: Request,
   fetchImpl = crmReplies(201, { success: true, data: {} }),
   cfg = config,
-) => handleSubmitLead(req, cfg, fetchImpl as unknown as typeof fetch, mailOk);
+  captcha: (token: string | undefined, ip: string) => Promise<CaptchaResult> = captchaOk,
+) => handleSubmitLead(req, cfg, fetchImpl as unknown as typeof fetch, mailOk, captcha);
 
 beforeEach(() => resetRateLimit());
 
@@ -89,8 +92,13 @@ describe("handleSubmitLead", () => {
       custom2: "ouro-30",
       custom3: "high",
     });
-    expect(body.questions).toContainEqual({ key: "experience", value: "Iniciante (já testei)" });
-    expect(body.questions).toContainEqual({ key: "utm_source", value: "meta" });
+    expect(body.questions).toEqual([
+      { key: "age_30_plus", value: "yes" },
+      { key: "experience", value: "Iniciante (já testei)" },
+      { key: "goal", value: expect.any(String) },
+      { key: "deposit_250", value: expect.any(String) },
+      { key: "consent_contact_lgpd", value: "yes" },
+    ]);
   });
 
   it("returns the autologin URL only for the CRM host over https", async () => {
@@ -157,6 +165,7 @@ describe("handleSubmitLead", () => {
       config,
       crm as unknown as typeof fetch,
       async () => false,
+      captchaOk,
     );
     expect(res.status).toBe(422);
     expect((await res.json()).field).toBe("email");
@@ -182,5 +191,40 @@ describe("handleSubmitLead", () => {
     });
     expect((await send(post(lead), down as never)).status).toBe(503);
     expect((await send(post(lead), crmReplies(500, { success: false }))).status).toBe(503);
+  });
+
+  it("checks the captcha with the token and visitor IP before calling the CRM", async () => {
+    const crm = crmReplies(201, { success: true });
+    const captcha = vi.fn(captchaOk);
+    const res = await send(post({ ...lead, captchaToken: "tok" }), crm, config, captcha);
+    expect(res.status).toBe(200);
+    expect(captcha).toHaveBeenCalledWith("tok", "203.0.113.7");
+    expect(JSON.parse(crm.mock.calls[0]![1]!.body as string)).not.toHaveProperty("captchaToken");
+  });
+
+  it("rejects a failed captcha with 403 and never calls the CRM", async () => {
+    const crm = crmReplies(201, { success: true });
+    for (const reason of ["missing", "invalid", "hostname", "action"] as const) {
+      const res = await send(post(lead), crm, config, async () => ({ ok: false, reason }));
+      expect(res.status).toBe(403);
+      expect((await res.json()).error).toContain("verificação de segurança");
+    }
+    expect(crm).not.toHaveBeenCalled();
+  });
+
+  it("answers 503 when the captcha can't be checked (fail closed)", async () => {
+    const crm = crmReplies(201, { success: true });
+    for (const reason of ["unavailable", "not_configured"] as const) {
+      const res = await send(post(lead), crm, config, async () => ({ ok: false, reason }));
+      expect(res.status).toBe(503);
+    }
+    expect(crm).not.toHaveBeenCalled();
+  });
+
+  it("drops honeypot leads before the captcha check", async () => {
+    const captcha = vi.fn(captchaOk);
+    const res = await send(post({ ...lead, website: "spam.example" }), undefined, config, captcha);
+    expect(res.status).toBe(200);
+    expect(captcha).not.toHaveBeenCalled();
   });
 });

@@ -8,6 +8,8 @@ import {
   type LeadField,
 } from "./lead";
 import { isRateLimited, type RateRule } from "./rate-limit";
+import { CAPTCHA_ERROR } from "./turnstile";
+import { verifyTurnstile, type CaptchaResult } from "./turnstile.server";
 import { checkBrMobile } from "./validation";
 
 // Lead endpoint, modelled on arabic-trading-spark's src/lib/lead-proxy.server.ts.
@@ -98,13 +100,14 @@ export function toCrmPayload(lead: Lead, ipAddress: string, config: CrmConfig, u
     custom2: utm["utm_campaign"],
     custom3: score,
     click_ua: userAgent?.slice(0, 500),
+    // Only the five form questions; score and UTMs already go in custom1–3.
+    // The schema requires over30 and consent to be true, so both are always "yes".
     questions: [
       { key: "age_30_plus", value: "yes" },
       { key: "experience", value: label(experienceOptions, lead.experience) },
       { key: "goal", value: label(goalOptions, lead.goal) },
       { key: "deposit_250", value: label(depositOptions, lead.deposit) },
-      { key: "lead_score", value: score },
-      ...Object.entries(utm).map(([key, value]) => ({ key, value })),
+      { key: "consent_contact_lgpd", value: "yes" },
     ],
   };
 }
@@ -176,6 +179,8 @@ export async function handleSubmitLead(
   config: CrmConfig = crmConfig(),
   fetchImpl: typeof fetch = fetch,
   checkMailDomain: (email: string) => Promise<boolean> = domainReceivesMail,
+  verifyCaptcha: (token: string | undefined, ip: string) => Promise<CaptchaResult> = (t, i) =>
+    verifyTurnstile(t, i),
 ): Promise<Response> {
   if (request.method !== "POST") return json(405, { success: false });
   if (!request.headers.get("content-type")?.startsWith("application/json")) {
@@ -219,13 +224,33 @@ export async function handleSubmitLead(
 
   // Bots fill the hidden field: answer success so they don't retry, send nothing.
   if (lead.website) {
-    console.warn("lead submit: honeypot filled, dropped");
+    console.warn("lead submit: rejected reason=honeypot (dropped, answered success)");
     return json(200, { success: true });
   }
 
   if (!config.endpoint || !config.apiKey) {
     console.error("lead submit: BASE_ENDPOINT or BASE_API_KEY is not set");
     return json(503, { success: false });
+  }
+
+  // Before the CRM call: no lead without a valid captcha (fail closed if Cloudflare is down).
+  const captcha = await verifyCaptcha(lead.captchaToken, ip);
+  if (!captcha.ok) {
+    if (captcha.reason === "not_configured") {
+      console.error("lead submit: TURNSTILE_SECRET_KEY is not set");
+      return json(503, { success: false });
+    }
+    if (captcha.reason === "unavailable") {
+      console.error(`lead submit: rejected reason=captcha_unavailable detail=${captcha.detail}`);
+      return json(503, {
+        success: false,
+        error: "Não foi possível verificar agora. Tente novamente em instantes.",
+      });
+    }
+    console.warn(
+      `lead submit: rejected reason=captcha_failed detail=${captcha.reason}:${captcha.detail || "-"}`,
+    );
+    return json(403, { success: false, error: CAPTCHA_ERROR });
   }
 
   if (!(await checkMailDomain(lead.email))) {

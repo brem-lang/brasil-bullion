@@ -1,9 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ArrowRight, CheckCircle2, Lock, ShieldCheck } from "lucide-react";
 import { depositOptions, experienceOptions, goalOptions, leadSchema } from "@/lib/lead";
 import { trackLead } from "@/lib/meta-pixel";
 import { submitLead } from "@/lib/submit-lead";
+import { CAPTCHA_ERROR, TURNSTILE_ACTION, TURNSTILE_SITE_KEY } from "@/lib/turnstile";
 import { formatBrPhone } from "@/lib/validation";
+import { Turnstile, type TurnstileHandle } from "./Turnstile";
 
 type Opt = { value: string; label: string };
 
@@ -87,6 +89,14 @@ export function LeadForm({ id }: { id?: string }) {
   const [loading, setLoading] = useState(false);
   const [utm, setUtm] = useState<Record<string, string>>({});
   const [clickId, setClickId] = useState("");
+  const [captchaToken, setCaptchaToken] = useState("");
+  const [captchaFailed, setCaptchaFailed] = useState(false);
+  const captcha = useRef<TurnstileHandle>(null);
+
+  useEffect(() => {
+    if (!TURNSTILE_SITE_KEY)
+      console.error("VITE_TURNSTILE_SITE_KEY is not set: leads will be rejected");
+  }, []);
 
   useEffect(() => {
     const p = new URLSearchParams(window.location.search);
@@ -133,6 +143,7 @@ export function LeadForm({ id }: { id?: string }) {
       utm,
       clickId: clickId || undefined,
       website: f.website || undefined,
+      captchaToken: captchaToken || undefined,
     });
     if (!r.success) {
       const issue = r.error.issues[0];
@@ -144,10 +155,14 @@ export function LeadForm({ id }: { id?: string }) {
       }
       return setErr(issue?.message ?? "Erro");
     }
+    // A honeypot bot never gets a token; let it through to the server's silent drop.
+    if (!r.data.captchaToken && !r.data.website) return setErr(CAPTCHA_ERROR);
     setErr("");
     setLoading(true);
     try {
       const res = await submitLead(r.data);
+      // Tokens work once: get a new one for the next attempt.
+      if (!res.ok) captcha.current?.reset();
       if (res.ok) {
         // The server also answers success to honeypot bots, so don't count those.
         if (!r.data.website) trackLead();
@@ -158,6 +173,7 @@ export function LeadForm({ id }: { id?: string }) {
         setFieldErr({ [res.field]: res.error });
       } else setErr(res.error);
     } catch {
+      captcha.current?.reset();
       setErr("Não foi possível enviar agora. Tente novamente.");
     } finally {
       setLoading(false);
@@ -333,6 +349,24 @@ export function LeadForm({ id }: { id?: string }) {
                 Aceito ser contatado por telefone, WhatsApp e e-mail e concordo com a Política de
                 Privacidade (LGPD).
               </label>
+              {TURNSTILE_SITE_KEY && (
+                <Turnstile
+                  ref={captcha}
+                  siteKey={TURNSTILE_SITE_KEY}
+                  action={TURNSTILE_ACTION}
+                  onToken={(t) => {
+                    setCaptchaToken(t);
+                    if (t) setCaptchaFailed(false);
+                  }}
+                  onError={() => setCaptchaFailed(true)}
+                />
+              )}
+              {captchaFailed && (
+                <p className="text-xs text-muted-foreground">
+                  A verificação de segurança não carregou. Desative bloqueadores de anúncio para
+                  este site ou recarregue a página.
+                </p>
+              )}
               {err && <p className="text-sm font-medium text-destructive">{err}</p>}
               <div className="flex gap-2">
                 <button

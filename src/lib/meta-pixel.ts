@@ -1,5 +1,11 @@
 export const META_PIXEL_ID = "1141837911869784";
 
+/**
+ * Only production builds load the pixel, so `npm run dev` sends nothing to Meta.
+ * Without the base code fbq stays undefined and trackPageView/trackLead do nothing.
+ */
+export const META_PIXEL_ENABLED = import.meta.env.PROD;
+
 /** Meta's base code: loads fbevents.js and sends the first PageView. */
 export const META_PIXEL_SNIPPET = `!function(f,b,e,v,n,t,s)
 {if(f.fbq)return;n=f.fbq=function(){n.callMethod?

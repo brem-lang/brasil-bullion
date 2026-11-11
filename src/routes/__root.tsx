@@ -11,7 +11,12 @@ import {
 } from "@tanstack/react-router";
 import { useEffect, useRef, type ReactNode } from "react";
 
-import { META_PIXEL_NOSCRIPT_URL, META_PIXEL_SNIPPET, trackPageView } from "@/lib/meta-pixel";
+import {
+  META_PIXEL_ENABLED,
+  META_PIXEL_NOSCRIPT_URL,
+  META_PIXEL_SNIPPET,
+  trackPageView,
+} from "@/lib/meta-pixel";
 import appCss from "../styles.css?url";
 
 function NotFoundComponent() {
@@ -104,18 +109,20 @@ function RootShell({ children }: { children: ReactNode }) {
       <head>
         <HeadContent />
         {/* A plain tag, so hydration can't run it again and send a second PageView. */}
-        <script dangerouslySetInnerHTML={{ __html: META_PIXEL_SNIPPET }} />
+        {META_PIXEL_ENABLED && <script dangerouslySetInnerHTML={{ __html: META_PIXEL_SNIPPET }} />}
       </head>
       <body>
-        <noscript>
-          <img
-            height="1"
-            width="1"
-            style={{ display: "none" }}
-            alt=""
-            src={META_PIXEL_NOSCRIPT_URL}
-          />
-        </noscript>
+        {META_PIXEL_ENABLED && (
+          <noscript>
+            <img
+              height="1"
+              width="1"
+              style={{ display: "none" }}
+              alt=""
+              src={META_PIXEL_NOSCRIPT_URL}
+            />
+          </noscript>
+        )}
         {children}
         <Scripts />
       </body>

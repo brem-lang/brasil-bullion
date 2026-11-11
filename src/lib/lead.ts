@@ -51,6 +51,8 @@ export const leadSchema = z.object({
   clickId: z.string().max(128).optional(),
   // Honeypot: hidden field real visitors never fill.
   website: z.string().max(200).optional(),
+  // Cloudflare Turnstile token; the server rejects the lead without a valid one.
+  captchaToken: z.string().max(2048).optional(),
 });
 
 export type Lead = z.infer<typeof leadSchema>;
