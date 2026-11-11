@@ -4,12 +4,14 @@ import {
   Link,
   createRootRouteWithContext,
   useRouter,
+  useRouterState,
   HeadContent,
   Scripts,
   type ErrorComponentProps,
 } from "@tanstack/react-router";
-import type { ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 
+import { META_PIXEL_NOSCRIPT_URL, META_PIXEL_SNIPPET, trackPageView } from "@/lib/meta-pixel";
 import appCss from "../styles.css?url";
 
 function NotFoundComponent() {
@@ -101,8 +103,19 @@ function RootShell({ children }: { children: ReactNode }) {
     <html lang="pt-BR">
       <head>
         <HeadContent />
+        {/* A plain tag, so hydration can't run it again and send a second PageView. */}
+        <script dangerouslySetInnerHTML={{ __html: META_PIXEL_SNIPPET }} />
       </head>
       <body>
+        <noscript>
+          <img
+            height="1"
+            width="1"
+            style={{ display: "none" }}
+            alt=""
+            src={META_PIXEL_NOSCRIPT_URL}
+          />
+        </noscript>
         {children}
         <Scripts />
       </body>
@@ -112,6 +125,15 @@ function RootShell({ children }: { children: ReactNode }) {
 
 function RootComponent() {
   const { queryClient } = Route.useRouteContext();
+
+  // The base code tracks the first load, so only send PageView when the path changes.
+  const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const trackedPath = useRef(pathname);
+  useEffect(() => {
+    if (trackedPath.current === pathname) return;
+    trackedPath.current = pathname;
+    trackPageView();
+  }, [pathname]);
 
   return (
     <QueryClientProvider client={queryClient}>

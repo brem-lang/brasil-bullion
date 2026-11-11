@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { ArrowRight, CheckCircle2, Lock, ShieldCheck } from "lucide-react";
 import { depositOptions, experienceOptions, goalOptions, leadSchema } from "@/lib/lead";
+import { trackLead } from "@/lib/meta-pixel";
 import { submitLead } from "@/lib/submit-lead";
 import { formatBrPhone } from "@/lib/validation";
 
@@ -148,6 +149,8 @@ export function LeadForm({ id }: { id?: string }) {
     try {
       const res = await submitLead(r.data);
       if (res.ok) {
+        // The server also answers success to honeypot bots, so don't count those.
+        if (!r.data.website) trackLead();
         setStep(3);
         if (res.autologinUrl) setTimeout(() => window.location.assign(res.autologinUrl!), 1500);
       } else if (res.field) {
