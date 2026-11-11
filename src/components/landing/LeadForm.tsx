@@ -70,6 +70,45 @@ function FieldError({ id, msg }: { id: string; msg?: string | undefined }) {
   );
 }
 
+/**
+ * Opens a blank tab while still inside the submit click, so the browser doesn't treat it as
+ * an unwanted popup. The autologin URL only arrives after the request, too late to open one.
+ * Returns null when the browser blocks it anyway (some in-app browsers, strict settings).
+ */
+function openPlaceholderTab(): Window | null {
+  let win: Window | null = null;
+  try {
+    win = window.open("", "_blank");
+  } catch {
+    return null;
+  }
+  if (!win) return null;
+  try {
+    // Not "noopener": that makes window.open return null, leaving nothing to navigate later.
+    win.opener = null;
+    win.document.title = "Carregando...";
+    win.document.body.innerHTML =
+      '<p style="font-family:system-ui,sans-serif;text-align:center;margin-top:40vh;color:#555">Carregando sua conta...</p>';
+  } catch {
+    // The tab still works without the message.
+  }
+  keepFocusHere(win);
+  return win;
+}
+
+/**
+ * Best effort to keep the visitor on this tab while the other one loads behind it.
+ * Most browsers (Chrome, Safari, mobile, default Firefox) ignore this and switch anyway.
+ */
+function keepFocusHere(tab: Window) {
+  try {
+    tab.blur();
+    window.focus();
+  } catch {
+    // Not allowed here; the visitor just sees the new tab.
+  }
+}
+
 export function LeadForm({ id }: { id?: string }) {
   const [step, setStep] = useState<1 | 2 | 3>(1);
   const [f, setF] = useState({
@@ -91,7 +130,16 @@ export function LeadForm({ id }: { id?: string }) {
   const [clickId, setClickId] = useState("");
   const [captchaToken, setCaptchaToken] = useState("");
   const [captchaFailed, setCaptchaFailed] = useState(false);
+  // Set only when the new tab was blocked: step 3 then shows a link to open it by hand.
+  const [autologinLink, setAutologinLink] = useState("");
+  // The autologin tab was opened (possibly behind this one).
+  const [autologinOpened, setAutologinOpened] = useState(false);
   const captcha = useRef<TurnstileHandle>(null);
+  // When the form appeared; sent as fillMs so the server can flag instant submits.
+  const shownAt = useRef(0);
+  useEffect(() => {
+    shownAt.current = Date.now();
+  }, []);
 
   useEffect(() => {
     if (!TURNSTILE_SITE_KEY)
@@ -144,6 +192,7 @@ export function LeadForm({ id }: { id?: string }) {
       clickId: clickId || undefined,
       website: f.website || undefined,
       captchaToken: captchaToken || undefined,
+      fillMs: shownAt.current ? Math.max(0, Date.now() - shownAt.current) : undefined,
     });
     if (!r.success) {
       const issue = r.error.issues[0];
@@ -155,19 +204,27 @@ export function LeadForm({ id }: { id?: string }) {
       }
       return setErr(issue?.message ?? "Erro");
     }
-    // A honeypot bot never gets a token; let it through to the server's silent drop.
-    if (!r.data.captchaToken && !r.data.website) return setErr(CAPTCHA_ERROR);
+    if (!r.data.captchaToken) return setErr(CAPTCHA_ERROR);
     setErr("");
     setLoading(true);
+    const tab = openPlaceholderTab();
+    let tabUsed = false;
     try {
       const res = await submitLead(r.data);
       // Tokens work once: get a new one for the next attempt.
       if (!res.ok) captcha.current?.reset();
       if (res.ok) {
-        // The server also answers success to honeypot bots, so don't count those.
+        // Honeypot leads reach the CRM flagged as bots; don't count them for Meta.
         if (!r.data.website) trackLead();
         setStep(3);
-        if (res.autologinUrl) setTimeout(() => window.location.assign(res.autologinUrl!), 1500);
+        if (res.autologinUrl) {
+          if (tab && !tab.closed) {
+            tab.location.replace(res.autologinUrl);
+            keepFocusHere(tab);
+            tabUsed = true;
+            setAutologinOpened(true);
+          } else setAutologinLink(res.autologinUrl);
+        }
       } else if (res.field) {
         setStep(1);
         setFieldErr({ [res.field]: res.error });
@@ -176,6 +233,7 @@ export function LeadForm({ id }: { id?: string }) {
       captcha.current?.reset();
       setErr("Não foi possível enviar agora. Tente novamente.");
     } finally {
+      if (tab && !tabUsed) tab.close();
       setLoading(false);
     }
   };
@@ -201,6 +259,21 @@ export function LeadForm({ id }: { id?: string }) {
           <p className="mt-2 text-muted-foreground">
             Um especialista entrará em contato via WhatsApp em breve. Fique de olho no seu celular.
           </p>
+          {autologinOpened && (
+            <p className="mt-4 text-sm font-medium text-foreground">
+              Sua conta foi aberta em uma nova aba.
+            </p>
+          )}
+          {autologinLink && (
+            <a
+              href={autologinLink}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mt-6 inline-flex items-center justify-center gap-2 rounded-lg bg-gold-gradient px-6 py-4 text-lg font-bold text-accent-foreground shadow-gold transition hover:brightness-105"
+            >
+              Acessar minha conta <ArrowRight className="h-5 w-5" />
+            </a>
+          )}
         </div>
       ) : (
         <>
