@@ -4,7 +4,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SubmitResult } from "@/lib/submit-lead";
 
 const submitLead = vi.fn<(input: unknown) => Promise<SubmitResult>>();
+const goTo = vi.fn<(url: string) => void>();
 vi.mock("@/lib/submit-lead", () => ({ submitLead: (i: unknown) => submitLead(i) }));
+vi.mock("@/lib/navigate", () => ({ goTo: (u: string) => goTo(u) }));
 vi.mock("@/lib/meta-pixel", () => ({ trackLead: vi.fn() }));
 vi.mock("@/lib/turnstile", () => ({
   TURNSTILE_SITE_KEY: "test-key",
@@ -22,9 +24,10 @@ vi.mock("@/components/landing/Turnstile", () => ({
   }),
 }));
 
-const { LeadForm } = await import("@/components/landing/LeadForm");
+const { LeadForm, AUTOLOGIN_DELAY_MS } = await import("@/components/landing/LeadForm");
 
 const URL_OK = "https://crm.example/autologin?t=abc";
+const BONUS_URL = new URL("/cadastro?bonus=1", window.location.href).href;
 
 function fakeTab() {
   return {
@@ -33,18 +36,15 @@ function fakeTab() {
     document: { title: "", body: { innerHTML: "" } },
     location: { replace: vi.fn() },
     close: vi.fn(),
-    blur: vi.fn(),
   };
 }
 
 let open: ReturnType<typeof vi.fn>;
-let focus: ReturnType<typeof vi.fn>;
 beforeEach(() => {
   open = vi.fn();
-  focus = vi.fn();
   vi.stubGlobal("open", open);
-  vi.stubGlobal("focus", focus);
   submitLead.mockReset();
+  goTo.mockReset();
 });
 afterEach(() => vi.unstubAllGlobals());
 
@@ -67,8 +67,8 @@ function fillAndSubmit() {
   fireEvent.click(screen.getByText("Quero começar agora"));
 }
 
-describe("LeadForm autologin tab", () => {
-  it("opens the tab during the click and sends it to the autologin URL", async () => {
+describe("LeadForm after signup", () => {
+  it("opens the bonus page in a new tab and sends this tab to the autologin URL", async () => {
     const tab = fakeTab();
     open.mockReturnValue(tab);
     let openedBeforeRequest = false;
@@ -80,26 +80,33 @@ describe("LeadForm autologin tab", () => {
     fillAndSubmit();
     await screen.findByText(/Cadastro recebido/);
 
+    // The tab opens during the click (or the browser blocks it), then gets the bonus page.
     expect(openedBeforeRequest).toBe(true);
     expect(open).toHaveBeenCalledWith("", "_blank");
     expect(tab.opener).toBeNull();
-    expect(tab.location.replace).toHaveBeenCalledWith(URL_OK);
+    expect(tab.location.replace).toHaveBeenCalledWith(BONUS_URL);
     expect(tab.close).not.toHaveBeenCalled();
-    // Tries to keep this tab in front, both when opening and after navigating.
-    expect(tab.blur).toHaveBeenCalledTimes(2);
-    expect(focus).toHaveBeenCalledTimes(2);
-    expect(screen.getByText("Sua conta foi aberta em uma nova aba.")).toBeInTheDocument();
-    expect(screen.queryByText("Acessar minha conta")).not.toBeInTheDocument();
+    expect(screen.getByText("Redirecionando para sua conta...")).toBeInTheDocument();
+
+    // This tab goes to the account after the success message.
+    expect(goTo).not.toHaveBeenCalled();
+    await waitFor(() => expect(goTo).toHaveBeenCalledWith(URL_OK), {
+      timeout: AUTOLOGIN_DELAY_MS + 1000,
+    });
   });
 
-  it("closes the tab when there is no autologin URL", async () => {
+  it("still opens the bonus tab when there is no autologin URL, and stays here", async () => {
     const tab = fakeTab();
     open.mockReturnValue(tab);
     submitLead.mockResolvedValue({ ok: true });
 
     fillAndSubmit();
     await screen.findByText(/Cadastro recebido/);
-    expect(tab.close).toHaveBeenCalled();
+    expect(tab.location.replace).toHaveBeenCalledWith(BONUS_URL);
+    expect(tab.close).not.toHaveBeenCalled();
+    expect(screen.queryByText("Redirecionando para sua conta...")).not.toBeInTheDocument();
+    await new Promise((r) => setTimeout(r, AUTOLOGIN_DELAY_MS + 100));
+    expect(goTo).not.toHaveBeenCalled();
   });
 
   it("closes the tab when the submit fails", async () => {
@@ -122,7 +129,7 @@ describe("LeadForm autologin tab", () => {
     await waitFor(() => expect(tab.close).toHaveBeenCalled());
   });
 
-  it("shows a link to open the account when the browser blocks the tab", async () => {
+  it("when the tab is blocked, stays here with the bonus and a link to the account", async () => {
     open.mockReturnValue(null);
     submitLead.mockResolvedValue({ ok: true, autologinUrl: URL_OK });
 
@@ -131,6 +138,8 @@ describe("LeadForm autologin tab", () => {
     expect(link).toHaveAttribute("href", URL_OK);
     expect(link).toHaveAttribute("target", "_blank");
     expect(link).toHaveAttribute("rel", "noopener noreferrer");
-    expect(screen.queryByText("Sua conta foi aberta em uma nova aba.")).not.toBeInTheDocument();
+    expect(screen.getByText(/Deposite US\$250 e opere com US\$500/)).toBeInTheDocument();
+    await new Promise((r) => setTimeout(r, AUTOLOGIN_DELAY_MS + 100));
+    expect(goTo).not.toHaveBeenCalled();
   });
 });

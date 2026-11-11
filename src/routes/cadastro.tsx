@@ -1,4 +1,4 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useRouterState } from "@tanstack/react-router";
 import {
   BarChart3,
   BookOpen,
@@ -18,7 +18,9 @@ import {
   AccordionItem,
   AccordionTrigger,
 } from "@/components/ui/accordion";
+import { BonusOffer } from "@/components/landing/BonusBanner";
 import { LeadForm } from "@/components/landing/LeadForm";
+import { isBonusSearch } from "@/lib/bonus";
 import { useEffect, useState } from "react";
 import { HeroPhoto } from "@/components/landing/HeroPhoto";
 import { fmt, getPrices, type Quote } from "@/lib/prices.functions";
@@ -55,6 +57,8 @@ function scrollToForm() {
 
 function Index() {
   const initial = Route.useLoaderData();
+  // The tab opened after signup (?bonus=1): the bonus offer takes the forms' place.
+  const bonus = useRouterState({ select: (s) => isBonusSearch(s.location.searchStr) });
   const [quotes, setQuotes] = useState<Quote[]>(initial ?? []);
   useEffect(() => {
     const id = setInterval(
@@ -87,7 +91,7 @@ function Index() {
             onClick={scrollToForm}
             className="rounded-lg bg-gold-gradient px-5 py-2.5 text-sm font-bold text-accent-foreground shadow-gold"
           >
-            Cadastre-se
+            {bonus ? "Ativar bônus" : "Cadastre-se"}
           </button>
         </div>
         <div className="overflow-hidden border-t border-deep-foreground/10 py-2 text-xs">
@@ -139,7 +143,7 @@ function Index() {
               />
             </div>
           </div>
-          <LeadForm id="cadastro" />
+          {bonus ? <BonusOffer id="cadastro" /> : <LeadForm id="cadastro" />}
         </div>
       </section>
 
@@ -257,7 +261,7 @@ function Index() {
             onClick={scrollToForm}
             className="mt-10 inline-block rounded-lg bg-gold-gradient px-8 py-4 text-lg font-bold text-accent-foreground shadow-gold"
           >
-            Quero meu especialista
+            {bonus ? "Quero meu bônus de 100%" : "Quero meu especialista"}
           </button>
         </div>
       </section>
@@ -347,10 +351,12 @@ function Index() {
               Seu patrimônio merece mais do que a <span className="text-primary">poupança</span>.
             </h2>
             <p className="mt-4 text-lg text-muted-foreground">
-              Cadastre-se agora e receba o contato de um especialista em ouro e petróleo.
+              {bonus
+                ? "Comece com o dobro: fale com seu especialista e ative o bônus de 100% no primeiro depósito."
+                : "Cadastre-se agora e receba o contato de um especialista em ouro e petróleo."}
             </p>
           </div>
-          <LeadForm />
+          {bonus ? <BonusOffer /> : <LeadForm />}
         </div>
       </section>
 

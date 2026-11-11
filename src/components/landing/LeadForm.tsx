@@ -1,10 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { ArrowRight, CheckCircle2, Lock, ShieldCheck } from "lucide-react";
+import { bonusUrl } from "@/lib/bonus";
 import { depositOptions, experienceOptions, goalOptions, leadSchema } from "@/lib/lead";
 import { trackLead } from "@/lib/meta-pixel";
+import { goTo } from "@/lib/navigate";
 import { submitLead } from "@/lib/submit-lead";
 import { CAPTCHA_ERROR, TURNSTILE_ACTION, TURNSTILE_SITE_KEY } from "@/lib/turnstile";
 import { formatBrPhone } from "@/lib/validation";
+import { BonusBanner } from "./BonusBanner";
 import { Turnstile, type TurnstileHandle } from "./Turnstile";
 
 type Opt = { value: string; label: string };
@@ -72,8 +75,8 @@ function FieldError({ id, msg }: { id: string; msg?: string | undefined }) {
 
 /**
  * Opens a blank tab while still inside the submit click, so the browser doesn't treat it as
- * an unwanted popup. The autologin URL only arrives after the request, too late to open one.
- * Returns null when the browser blocks it anyway (some in-app browsers, strict settings).
+ * an unwanted popup. It only gets the bonus page once the lead is accepted, which is too late
+ * to open a tab. Returns null when the browser blocks it anyway (in-app browsers, strict settings).
  */
 function openPlaceholderTab(): Window | null {
   let win: Window | null = null;
@@ -88,26 +91,15 @@ function openPlaceholderTab(): Window | null {
     win.opener = null;
     win.document.title = "Carregando...";
     win.document.body.innerHTML =
-      '<p style="font-family:system-ui,sans-serif;text-align:center;margin-top:40vh;color:#555">Carregando sua conta...</p>';
+      '<p style="font-family:system-ui,sans-serif;text-align:center;margin-top:40vh;color:#555">Carregando...</p>';
   } catch {
     // The tab still works without the message.
   }
-  keepFocusHere(win);
   return win;
 }
 
-/**
- * Best effort to keep the visitor on this tab while the other one loads behind it.
- * Most browsers (Chrome, Safari, mobile, default Firefox) ignore this and switch anyway.
- */
-function keepFocusHere(tab: Window) {
-  try {
-    tab.blur();
-    window.focus();
-  } catch {
-    // Not allowed here; the visitor just sees the new tab.
-  }
-}
+/** How long the success message shows before this tab goes to the autologin URL. */
+export const AUTOLOGIN_DELAY_MS = 1500;
 
 export function LeadForm({ id }: { id?: string }) {
   const [step, setStep] = useState<1 | 2 | 3>(1);
@@ -130,10 +122,12 @@ export function LeadForm({ id }: { id?: string }) {
   const [clickId, setClickId] = useState("");
   const [captchaToken, setCaptchaToken] = useState("");
   const [captchaFailed, setCaptchaFailed] = useState(false);
-  // Set only when the new tab was blocked: step 3 then shows a link to open it by hand.
+  // Set only when the bonus tab was blocked: this tab then stays, showing the bonus and a
+  // link to the account instead of redirecting (which would lose the offer).
   const [autologinLink, setAutologinLink] = useState("");
-  // The autologin tab was opened (possibly behind this one).
-  const [autologinOpened, setAutologinOpened] = useState(false);
+  const [bonusInline, setBonusInline] = useState(false);
+  // This tab is about to go to the account (the bonus opened in a new tab).
+  const [redirecting, setRedirecting] = useState(false);
   const captcha = useRef<TurnstileHandle>(null);
   // When the form appeared; sent as fillMs so the server can flag instant submits.
   const shownAt = useRef(0);
@@ -217,13 +211,18 @@ export function LeadForm({ id }: { id?: string }) {
         // Honeypot leads reach the CRM flagged as bots; don't count them for Meta.
         if (!r.data.website) trackLead();
         setStep(3);
-        if (res.autologinUrl) {
-          if (tab && !tab.closed) {
-            tab.location.replace(res.autologinUrl);
-            keepFocusHere(tab);
-            tabUsed = true;
-            setAutologinOpened(true);
-          } else setAutologinLink(res.autologinUrl);
+        if (tab && !tab.closed) {
+          // New tab: this page with the bonus banner. This tab: the account.
+          tab.location.replace(bonusUrl(window.location.href));
+          tabUsed = true;
+          const url = res.autologinUrl;
+          if (url) {
+            setRedirecting(true);
+            setTimeout(() => goTo(url), AUTOLOGIN_DELAY_MS);
+          }
+        } else {
+          setBonusInline(true);
+          if (res.autologinUrl) setAutologinLink(res.autologinUrl);
         }
       } else if (res.field) {
         setStep(1);
@@ -259,11 +258,12 @@ export function LeadForm({ id }: { id?: string }) {
           <p className="mt-2 text-muted-foreground">
             Um especialista entrará em contato via WhatsApp em breve. Fique de olho no seu celular.
           </p>
-          {autologinOpened && (
+          {redirecting && (
             <p className="mt-4 text-sm font-medium text-foreground">
-              Sua conta foi aberta em uma nova aba.
+              Redirecionando para sua conta...
             </p>
           )}
+          {bonusInline && <BonusBanner />}
           {autologinLink && (
             <a
               href={autologinLink}
