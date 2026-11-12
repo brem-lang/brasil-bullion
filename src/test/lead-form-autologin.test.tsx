@@ -9,6 +9,7 @@ vi.mock("@/lib/submit-lead", () => ({ submitLead: (i: unknown) => submitLead(i) 
 vi.mock("@/lib/navigate", () => ({ goTo: (u: string) => goTo(u) }));
 vi.mock("@/lib/meta-pixel", () => ({ trackLead: vi.fn() }));
 vi.mock("@/lib/turnstile", () => ({
+  CAPTCHA_ENABLED: true,
   TURNSTILE_SITE_KEY: "test-key",
   TURNSTILE_ACTION: "lead",
   CAPTCHA_ERROR: "captcha",
@@ -27,7 +28,8 @@ vi.mock("@/components/landing/Turnstile", () => ({
 const { LeadForm, AUTOLOGIN_DELAY_MS } = await import("@/components/landing/LeadForm");
 
 const URL_OK = "https://crm.example/autologin?t=abc";
-const BONUS_URL = new URL("/cadastro?bonus=1", window.location.href).href;
+const { whatsappLink } = await import("@/lib/bonus");
+const WHATSAPP_URL = whatsappLink();
 
 function fakeTab() {
   return {
@@ -48,7 +50,7 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllGlobals());
 
-function fillAndSubmit() {
+function fillToBanner() {
   render(<LeadForm />);
   fireEvent.change(screen.getByPlaceholderText("Nome"), { target: { value: "Maria" } });
   fireEvent.change(screen.getByPlaceholderText("Sobrenome"), { target: { value: "Silva" } });
@@ -64,11 +66,16 @@ function fillAndSubmit() {
   fireEvent.click(screen.getByText("Renda extra mensal"));
   fireEvent.click(screen.getByText("Sim, começo com US$250+"));
   fireEvent.click(screen.getByText(/Aceito ser contatado/));
-  fireEvent.click(screen.getByText("Quero começar agora"));
+  fireEvent.click(screen.getByText("Continuar"));
+}
+
+function fillAndSubmit() {
+  fillToBanner();
+  fireEvent.click(screen.getByText("Ativar meu bônus no WhatsApp"));
 }
 
 describe("LeadForm after signup", () => {
-  it("opens the bonus page in a new tab and sends this tab to the autologin URL", async () => {
+  it("opens WhatsApp in a new tab and sends this tab to the autologin URL", async () => {
     const tab = fakeTab();
     open.mockReturnValue(tab);
     let openedBeforeRequest = false;
@@ -80,11 +87,12 @@ describe("LeadForm after signup", () => {
     fillAndSubmit();
     await screen.findByText(/Cadastro recebido/);
 
-    // The tab opens during the click (or the browser blocks it), then gets the bonus page.
+    // The tab opens during the click (or the browser blocks it), then gets WhatsApp.
     expect(openedBeforeRequest).toBe(true);
     expect(open).toHaveBeenCalledWith("", "_blank");
     expect(tab.opener).toBeNull();
-    expect(tab.location.replace).toHaveBeenCalledWith(BONUS_URL);
+    expect(tab.document.body.innerHTML).toContain("Abrindo o WhatsApp…");
+    expect(tab.location.replace).toHaveBeenCalledWith(WHATSAPP_URL);
     expect(tab.close).not.toHaveBeenCalled();
     expect(screen.getByText("Redirecionando para sua conta...")).toBeInTheDocument();
 
@@ -95,14 +103,14 @@ describe("LeadForm after signup", () => {
     });
   });
 
-  it("still opens the bonus tab when there is no autologin URL, and stays here", async () => {
+  it("still opens the WhatsApp tab when there is no autologin URL, and stays here", async () => {
     const tab = fakeTab();
     open.mockReturnValue(tab);
     submitLead.mockResolvedValue({ ok: true });
 
     fillAndSubmit();
     await screen.findByText(/Cadastro recebido/);
-    expect(tab.location.replace).toHaveBeenCalledWith(BONUS_URL);
+    expect(tab.location.replace).toHaveBeenCalledWith(WHATSAPP_URL);
     expect(tab.close).not.toHaveBeenCalled();
     expect(screen.queryByText("Redirecionando para sua conta...")).not.toBeInTheDocument();
     await new Promise((r) => setTimeout(r, AUTOLOGIN_DELAY_MS + 100));
@@ -129,7 +137,7 @@ describe("LeadForm after signup", () => {
     await waitFor(() => expect(tab.close).toHaveBeenCalled());
   });
 
-  it("when the tab is blocked, stays here with the bonus and a link to the account", async () => {
+  it("when the tab is blocked, stays here with the WhatsApp button and a link to the account", async () => {
     open.mockReturnValue(null);
     submitLead.mockResolvedValue({ ok: true, autologinUrl: URL_OK });
 
@@ -141,5 +149,34 @@ describe("LeadForm after signup", () => {
     expect(screen.getByText(/Deposite US\$250 e opere com US\$500/)).toBeInTheDocument();
     await new Promise((r) => setTimeout(r, AUTOLOGIN_DELAY_MS + 100));
     expect(goTo).not.toHaveBeenCalled();
+  });
+});
+
+describe("LeadForm bonus step", () => {
+  it("shows the bonus banner after the questions, without sending the lead yet", () => {
+    fillToBanner();
+    expect(screen.getByText(/no seu primeiro depósito/)).toBeInTheDocument();
+    expect(screen.queryByText("Cadastro recebido")).not.toBeInTheDocument();
+    expect(screen.getByText("Ativar meu bônus no WhatsApp")).toBeInTheDocument();
+    expect(submitLead).not.toHaveBeenCalled();
+    expect(open).not.toHaveBeenCalled();
+  });
+
+  it("keeps the questions open until they are all answered", () => {
+    render(<LeadForm />);
+    fireEvent.change(screen.getByPlaceholderText("Nome"), { target: { value: "Maria" } });
+    fireEvent.change(screen.getByPlaceholderText("Sobrenome"), { target: { value: "Silva" } });
+    fireEvent.change(screen.getByPlaceholderText("Seu melhor e-mail"), {
+      target: { value: "maria.silva@gmail.com" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("(11) 98765-4321"), {
+      target: { value: "11987654321" },
+    });
+    fireEvent.click(screen.getByText(/30 anos ou mais/));
+    fireEvent.click(screen.getByText("Continuar"));
+    fireEvent.click(screen.getByText("Nunca operei"));
+    fireEvent.click(screen.getByText("Continuar"));
+    expect(screen.getByText("Responda todas as perguntas")).toBeInTheDocument();
+    expect(screen.queryByText("Ativar meu bônus no WhatsApp")).not.toBeInTheDocument();
   });
 });

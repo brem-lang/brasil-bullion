@@ -1,13 +1,21 @@
 import { useEffect, useRef, useState } from "react";
 import { ArrowRight, CheckCircle2, Lock, ShieldCheck } from "lucide-react";
-import { bonusUrl } from "@/lib/bonus";
+import { whatsappLink } from "@/lib/bonus";
+import { TIMED_FIELDS, createFormTimer, type TimedField } from "@/lib/form-timing";
 import { depositOptions, experienceOptions, goalOptions, leadSchema } from "@/lib/lead";
 import { trackLead } from "@/lib/meta-pixel";
 import { goTo } from "@/lib/navigate";
 import { submitLead } from "@/lib/submit-lead";
-import { CAPTCHA_ERROR, TURNSTILE_ACTION, TURNSTILE_SITE_KEY } from "@/lib/turnstile";
+import {
+  CAPTCHA_ENABLED,
+  CAPTCHA_ERROR,
+  TURNSTILE_ACTION,
+  TURNSTILE_SITE_KEY,
+} from "@/lib/turnstile";
 import { formatBrPhone } from "@/lib/validation";
-import { BonusBanner } from "./BonusBanner";
+import { loaderPageHtml } from "@/lib/loader-page";
+import { BonusBanner, BonusOffer, WhatsAppActionButton } from "./BonusBanner";
+import { RouteLoader } from "./RouteLoader";
 import { Turnstile, type TurnstileHandle } from "./Turnstile";
 
 type Opt = { value: string; label: string };
@@ -75,9 +83,11 @@ function FieldError({ id, msg }: { id: string; msg?: string | undefined }) {
 
 /**
  * Opens a blank tab while still inside the submit click, so the browser doesn't treat it as
- * an unwanted popup. It only gets the bonus page once the lead is accepted, which is too late
+ * an unwanted popup. It only gets WhatsApp once the lead is accepted, which is too late
  * to open a tab. Returns null when the browser blocks it anyway (in-app browsers, strict settings).
  */
+const WHATSAPP_LOADING_MSG = "Abrindo o WhatsApp…";
+
 function openPlaceholderTab(): Window | null {
   let win: Window | null = null;
   try {
@@ -89,9 +99,9 @@ function openPlaceholderTab(): Window | null {
   try {
     // Not "noopener": that makes window.open return null, leaving nothing to navigate later.
     win.opener = null;
-    win.document.title = "Carregando...";
-    win.document.body.innerHTML =
-      '<p style="font-family:system-ui,sans-serif;text-align:center;margin-top:40vh;color:#555">Carregando...</p>';
+    win.document.title = "Abrindo o WhatsApp…";
+    // Same look as the page's loader (RouteLoader).
+    win.document.body.innerHTML = loaderPageHtml(WHATSAPP_LOADING_MSG);
   } catch {
     // The tab still works without the message.
   }
@@ -102,7 +112,8 @@ function openPlaceholderTab(): Window | null {
 export const AUTOLOGIN_DELAY_MS = 1500;
 
 export function LeadForm({ id }: { id?: string }) {
-  const [step, setStep] = useState<1 | 2 | 3>(1);
+  // 1: contact, 2: questions, 3: bonus banner (its button sends the lead), 4: done.
+  const [step, setStep] = useState<1 | 2 | 3 | 4>(1);
   const [f, setF] = useState({
     firstName: "",
     lastName: "",
@@ -122,21 +133,25 @@ export function LeadForm({ id }: { id?: string }) {
   const [clickId, setClickId] = useState("");
   const [captchaToken, setCaptchaToken] = useState("");
   const [captchaFailed, setCaptchaFailed] = useState(false);
-  // Set only when the bonus tab was blocked: this tab then stays, showing the bonus and a
-  // link to the account instead of redirecting (which would lose the offer).
+  // Set only when the WhatsApp tab was blocked: this tab then stays, showing the WhatsApp
+  // button and a link to the account instead of redirecting (which would lose the chat).
   const [autologinLink, setAutologinLink] = useState("");
   const [bonusInline, setBonusInline] = useState(false);
-  // This tab is about to go to the account (the bonus opened in a new tab).
+  // This tab is about to go to the account (WhatsApp opened in a new tab).
   const [redirecting, setRedirecting] = useState(false);
   const captcha = useRef<TurnstileHandle>(null);
   // When the form appeared; sent as fillMs so the server can flag instant submits.
   const shownAt = useRef(0);
+  // Landing/field/click times for the leads log.
+  const timer = useRef<ReturnType<typeof createFormTimer> | null>(null);
+  const timed = () => (timer.current ??= createFormTimer());
   useEffect(() => {
     shownAt.current = Date.now();
+    timed().formLoaded();
   }, []);
 
   useEffect(() => {
-    if (!TURNSTILE_SITE_KEY)
+    if (CAPTCHA_ENABLED && !TURNSTILE_SITE_KEY)
       console.error("VITE_TURNSTILE_SITE_KEY is not set: leads will be rejected");
   }, []);
 
@@ -150,7 +165,10 @@ export function LeadForm({ id }: { id?: string }) {
     setClickId((p.get("click_id") ?? p.get("clickid") ?? "").slice(0, 128));
   }, []);
 
-  const set = (k: keyof typeof f, v: unknown) => setF((s) => ({ ...s, [k]: v }));
+  const set = (k: keyof typeof f, v: unknown) => {
+    if ((TIMED_FIELDS as readonly string[]).includes(k)) timed().input(k as TimedField);
+    setF((s) => ({ ...s, [k]: v }));
+  };
 
   // Error for one step-1 field, using the same schema the server applies.
   const fieldError = (k: Step1Field, value = f[k]) => {
@@ -165,6 +183,7 @@ export function LeadForm({ id }: { id?: string }) {
   };
 
   const next = () => {
+    timed().continueClick();
     const errs = Object.fromEntries(STEP1.map((k) => [k, fieldError(k)])) as Partial<
       Record<Step1Field, string>
     >;
@@ -179,8 +198,20 @@ export function LeadForm({ id }: { id?: string }) {
     setStep(2);
   };
 
+  // Questions → bonus banner, once every question and the consent are answered.
+  const toBonus = () => {
+    for (const k of ["experience", "goal", "deposit", "consent"] as const) {
+      const r = leadSchema.shape[k].safeParse(f[k]);
+      if (!r.success) return setErr(r.error.issues[0]?.message ?? "Erro");
+    }
+    setErr("");
+    setStep(3);
+  };
+
   const submit = async () => {
+    const timing = timed().submitClick();
     const r = leadSchema.safeParse({
+      timing,
       ...f,
       utm,
       clickId: clickId || undefined,
@@ -196,9 +227,14 @@ export function LeadForm({ id }: { id?: string }) {
         setFieldErr({ [k]: issue?.message });
         return;
       }
+      // Send the visitor back to the step holding the bad answer.
+      const key = issue?.path[0];
+      if (key === "over30") setStep(1);
+      else if (key === "experience" || key === "goal" || key === "deposit" || key === "consent")
+        setStep(2);
       return setErr(issue?.message ?? "Erro");
     }
-    if (!r.data.captchaToken) return setErr(CAPTCHA_ERROR);
+    if (CAPTCHA_ENABLED && !r.data.captchaToken) return setErr(CAPTCHA_ERROR);
     setErr("");
     setLoading(true);
     const tab = openPlaceholderTab();
@@ -206,14 +242,17 @@ export function LeadForm({ id }: { id?: string }) {
     try {
       const res = await submitLead(r.data);
       // Tokens work once: get a new one for the next attempt.
-      if (!res.ok) captcha.current?.reset();
+      if (!res.ok) {
+        setCaptchaToken("");
+        captcha.current?.reset();
+      }
       if (res.ok) {
         // Honeypot leads reach the CRM flagged as bots; don't count them for Meta.
         if (!r.data.website) trackLead();
-        setStep(3);
+        setStep(4);
         if (tab && !tab.closed) {
-          // New tab: this page with the bonus banner. This tab: the account.
-          tab.location.replace(bonusUrl(window.location.href));
+          // New tab: WhatsApp with the specialist. This tab: the account.
+          tab.location.replace(whatsappLink());
           tabUsed = true;
           const url = res.autologinUrl;
           if (url) {
@@ -229,6 +268,7 @@ export function LeadForm({ id }: { id?: string }) {
         setFieldErr({ [res.field]: res.error });
       } else setErr(res.error);
     } catch {
+      setCaptchaToken("");
       captcha.current?.reset();
       setErr("Não foi possível enviar agora. Tente novamente.");
     } finally {
@@ -241,17 +281,68 @@ export function LeadForm({ id }: { id?: string }) {
     id: `lead-${k}`,
     "aria-invalid": !!fieldErr[k],
     "aria-describedby": fieldErr[k] ? `lead-${k}-err` : undefined,
+    onFocus: () => timed().focus(k),
     onBlur: () => {
+      timed().blur(k);
       if (f[k]) validate(k);
     },
   });
+
+  // After the questions: the bonus banner, whose button sends the lead and opens WhatsApp.
+  if (step === 3)
+    return (
+      <>
+        {loading && <RouteLoader message={WHATSAPP_LOADING_MSG} />}
+        <BonusOffer
+          id={id}
+          received={false}
+          action={
+            <div className="space-y-3">
+              {/* Hidden while the captcha is switched off (VITE_CAPTCHA_ENABLED). */}
+              {CAPTCHA_ENABLED && TURNSTILE_SITE_KEY && (
+                <Turnstile
+                  ref={captcha}
+                  siteKey={TURNSTILE_SITE_KEY}
+                  action={TURNSTILE_ACTION}
+                  onToken={(t) => {
+                    setCaptchaToken(t);
+                    if (t) setCaptchaFailed(false);
+                  }}
+                  onError={() => setCaptchaFailed(true)}
+                />
+              )}
+              {captchaFailed && (
+                <p className="text-xs text-muted-foreground">
+                  A verificação de segurança não carregou. Desative bloqueadores de anúncio para
+                  este site ou recarregue a página.
+                </p>
+              )}
+              {err && <p className="text-sm font-medium text-destructive">{err}</p>}
+              <WhatsAppActionButton disabled={loading} onClick={submit}>
+                {loading ? "Enviando..." : "Ativar meu bônus no WhatsApp"}
+              </WhatsAppActionButton>
+              <button
+                type="button"
+                onClick={() => {
+                  setErr("");
+                  setStep(2);
+                }}
+                className="w-full text-center text-sm font-medium text-muted-foreground underline-offset-4 hover:underline"
+              >
+                Voltar
+              </button>
+            </div>
+          }
+        />
+      </>
+    );
 
   return (
     <div
       id={id}
       className="scroll-mt-24 self-center rounded-2xl border border-border bg-card p-6 text-card-foreground shadow-card sm:p-8"
     >
-      {step === 3 ? (
+      {step === 4 ? (
         <div className="py-8 text-center">
           <CheckCircle2 className="mx-auto h-14 w-14 text-success" />
           <h3 className="mt-4 text-2xl font-bold">Cadastro recebido, {f.firstName}!</h3>
@@ -422,40 +513,24 @@ export function LeadForm({ id }: { id?: string }) {
                 Aceito ser contatado por telefone, WhatsApp e e-mail e concordo com a Política de
                 Privacidade (LGPD).
               </label>
-              {TURNSTILE_SITE_KEY && (
-                <Turnstile
-                  ref={captcha}
-                  siteKey={TURNSTILE_SITE_KEY}
-                  action={TURNSTILE_ACTION}
-                  onToken={(t) => {
-                    setCaptchaToken(t);
-                    if (t) setCaptchaFailed(false);
-                  }}
-                  onError={() => setCaptchaFailed(true)}
-                />
-              )}
-              {captchaFailed && (
-                <p className="text-xs text-muted-foreground">
-                  A verificação de segurança não carregou. Desative bloqueadores de anúncio para
-                  este site ou recarregue a página.
-                </p>
-              )}
               {err && <p className="text-sm font-medium text-destructive">{err}</p>}
               <div className="flex gap-2">
                 <button
                   type="button"
-                  onClick={() => setStep(1)}
+                  onClick={() => {
+                    setErr("");
+                    setStep(1);
+                  }}
                   className="rounded-lg border border-input px-4 py-4 text-sm font-semibold"
                 >
                   Voltar
                 </button>
                 <button
                   type="button"
-                  disabled={loading}
-                  onClick={submit}
-                  className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-gold-gradient px-6 py-4 text-lg font-bold text-accent-foreground shadow-gold transition hover:brightness-105 disabled:opacity-60"
+                  onClick={toBonus}
+                  className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-gold-gradient px-6 py-4 text-lg font-bold text-accent-foreground shadow-gold transition hover:brightness-105"
                 >
-                  {loading ? "Enviando..." : "Quero começar agora"}
+                  Continuar <ArrowRight className="h-5 w-5" />
                 </button>
               </div>
             </div>

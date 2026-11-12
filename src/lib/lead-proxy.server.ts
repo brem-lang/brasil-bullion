@@ -7,8 +7,9 @@ import {
   type Lead,
   type LeadField,
 } from "./lead";
+import { timingReport } from "./form-timing-report";
 import { isRateLimited, type RateRule } from "./rate-limit";
-import { CAPTCHA_ERROR } from "./turnstile";
+import { CAPTCHA_ENABLED, CAPTCHA_ERROR } from "./turnstile";
 import { verifyTurnstile, type CaptchaResult } from "./turnstile.server";
 import { checkBrMobile } from "./validation";
 
@@ -60,6 +61,11 @@ export type CrmConfig = {
   autologinHosts?: string[] | undefined;
   /** Local dev only: IP to send when there is no Cloudflare/nginx header. */
   devIp?: string | undefined;
+  /** Leads log: gets a copy of the CRM payload for every lead the CRM accepted. */
+  logEndpoint?: string | undefined;
+  logApiKey?: string | undefined;
+  /** Require a valid Turnstile token (default true; crmConfig() follows CAPTCHA_ENABLED). */
+  captchaEnabled?: boolean | undefined;
 };
 
 /** Server-only settings from .env (never VITE_*, so the API key is not bundled into the page). */
@@ -73,7 +79,46 @@ export function crmConfig(): CrmConfig {
       .map((h) => h.trim().toLowerCase())
       .filter(Boolean),
     devIp: import.meta.env.DEV ? process.env["DEV_IP_ADDRESS"] || "127.0.0.1" : undefined,
+    logEndpoint: process.env["LEADS_LOG_ENDPOINT"] || DEFAULT_LOG_ENDPOINT,
+    logApiKey: process.env["LEADS_LOG_API_KEY"],
+    captchaEnabled: CAPTCHA_ENABLED,
   };
+}
+
+const DEFAULT_LOG_ENDPOINT = "https://alphamastercrm.online/api/leads-logs";
+const LOG_TIMEOUT_MS = 10_000;
+
+/**
+ * Sends the CRM payload to the leads log. Runs only after the CRM accepted the lead,
+ * never throws, and is not awaited by the caller, so it cannot delay or break the visitor's response.
+ */
+export async function sendLeadLog(
+  payload: ReturnType<typeof toCrmPayload>,
+  timing: Lead["timing"],
+  config: CrmConfig,
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  if (!config.logEndpoint || !config.logApiKey) return;
+  try {
+    const res = await fetchImpl(config.logEndpoint, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${config.logApiKey}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({
+        email: payload.email,
+        offer_name: payload.offer_name,
+        ip_address: payload.ip_address,
+        data: { ...payload, timing: timing ? timingReport(timing) : undefined },
+      }),
+      signal: AbortSignal.timeout(LOG_TIMEOUT_MS),
+    });
+    if (!res.ok) console.warn(`lead log: rejected status=${res.status}`);
+  } catch (err) {
+    console.warn("lead log: request failed", (err as Error).name);
+  }
 }
 
 /**
@@ -256,7 +301,9 @@ export async function handleSubmitLead(
   }
 
   // Before the CRM call: no lead without a valid captcha (fail closed if Cloudflare is down).
-  const captcha = await verifyCaptcha(lead.captchaToken, ip);
+  // Skipped while the captcha is switched off.
+  const captcha: CaptchaResult =
+    config.captchaEnabled === false ? { ok: true } : await verifyCaptcha(lead.captchaToken, ip);
   if (!captcha.ok) {
     if (captcha.reason === "not_configured") {
       console.error("lead submit: TURNSTILE_SECRET_KEY is not set");
@@ -339,6 +386,8 @@ export async function handleSubmitLead(
     }
 
     console.log(`lead submit: ${sent} → accepted lead_id=${String(result.data?.lead_id ?? "-")}`);
+    // Only accepted leads go to the leads log; not awaited, so it cannot delay the response.
+    void sendLeadLog(payload, lead.timing, config, fetchImpl);
     return json(200, {
       success: true,
       autologin_url: allowedAutologin(result.data?.autologin_url ?? result.autologin_url, config),

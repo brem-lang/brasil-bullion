@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { ArrowRight, CheckCircle2, Gift, MessageCircle, ShieldCheck } from "lucide-react";
 import { whatsappLink } from "@/lib/bonus";
 
@@ -7,40 +8,82 @@ const PERKS = [
   "Depósito rápido via PIX",
 ];
 
-/** Green WhatsApp button; goes to VITE_WHATSAPP_NUMBER once that is set. */
+/** Classes for the green WhatsApp call to action (link or button). */
+const whatsappCls = (large: boolean) =>
+  `group flex w-full items-center justify-center gap-2 rounded-xl bg-[#25D366] font-bold text-white shadow-lg shadow-[#25D366]/30 transition hover:scale-[1.02] hover:brightness-105 disabled:pointer-events-none disabled:opacity-60 ${
+    large ? "px-6 py-4 text-lg" : "px-5 py-3 text-base"
+  }`;
+
+function WhatsAppLabel({ large, children }: { large: boolean; children: ReactNode }) {
+  return (
+    <>
+      <MessageCircle className={large ? "h-6 w-6" : "h-5 w-5"} aria-hidden="true" />
+      {children}
+      <ArrowRight className="h-5 w-5 transition group-hover:translate-x-1" aria-hidden="true" />
+    </>
+  );
+}
+
+/** Green WhatsApp link; goes to VITE_WHATSAPP_NUMBER once that is set. */
 function WhatsAppButton({ large = false }: { large?: boolean }) {
   return (
     <a
       href={whatsappLink()}
       target="_blank"
       rel="noopener noreferrer"
-      className={`group flex w-full items-center justify-center gap-2 rounded-xl bg-[#25D366] font-bold text-white shadow-lg shadow-[#25D366]/30 transition hover:scale-[1.02] hover:brightness-105 ${
-        large ? "px-6 py-4 text-lg" : "px-5 py-3 text-base"
-      }`}
+      className={whatsappCls(large)}
     >
-      <MessageCircle className={large ? "h-6 w-6" : "h-5 w-5"} aria-hidden="true" />
-      Fale agora no WhatsApp
-      <ArrowRight className="h-5 w-5 transition group-hover:translate-x-1" aria-hidden="true" />
+      <WhatsAppLabel large={large}>Fale agora no WhatsApp</WhatsAppLabel>
     </a>
   );
 }
 
+/** Same look as the WhatsApp link, as a button (the form's submit). */
+export function WhatsAppActionButton({
+  onClick,
+  disabled,
+  children,
+}: {
+  onClick: () => void;
+  disabled?: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <button type="button" onClick={onClick} disabled={disabled} className={whatsappCls(true)}>
+      <WhatsAppLabel large>{children}</WhatsAppLabel>
+    </button>
+  );
+}
+
 /**
- * The 100% first-deposit bonus, shown on /cadastro?bonus=1 in place of the signup form
- * (the tab that opens after signup).
+ * The 100% first-deposit bonus. The signup form shows it as its last step, with `action`
+ * (the button that sends the lead) in place of the WhatsApp link and without the
+ * "Cadastro recebido" badge. Also shown on /cadastro?bonus=1 in place of the signup form.
  */
-export function BonusOffer({ id }: { id?: string }) {
+export function BonusOffer({
+  id,
+  received = true,
+  action,
+}: {
+  id?: string | undefined;
+  /** Show the "Cadastro recebido" badge (the lead is already in). */
+  received?: boolean;
+  /** Replaces the default WhatsApp link. */
+  action?: ReactNode;
+}) {
   return (
     <div
       id={id}
       className="relative scroll-mt-24 self-center overflow-hidden rounded-2xl border-2 border-gold bg-card p-6 text-card-foreground shadow-gold sm:p-8"
     >
-      <span className="inline-flex items-center gap-1.5 rounded-full bg-success/15 px-3 py-1 text-xs font-bold text-success">
-        <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
-        Cadastro recebido
-      </span>
+      {received && (
+        <span className="mb-5 inline-flex items-center gap-1.5 rounded-full bg-success/15 px-3 py-1 text-xs font-bold text-success">
+          <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
+          Cadastro recebido
+        </span>
+      )}
 
-      <div className="mt-5 flex items-start gap-4">
+      <div className="flex items-start gap-4">
         <span className="grid h-14 w-14 shrink-0 place-items-center rounded-2xl bg-gold-gradient text-accent-foreground shadow-gold">
           <Gift className="h-8 w-8" aria-hidden="true" />
         </span>
@@ -79,9 +122,7 @@ export function BonusOffer({ id }: { id?: string }) {
       <p className="mt-6 text-center text-base font-semibold">
         Seu especialista está esperando. Fale agora e ative seu bônus!
       </p>
-      <div className="mt-3">
-        <WhatsAppButton large />
-      </div>
+      <div className="mt-3">{action ?? <WhatsAppButton large />}</div>
 
       <p className="mt-4 flex items-center justify-center gap-1.5 text-xs text-muted-foreground">
         <ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" />
@@ -91,7 +132,7 @@ export function BonusOffer({ id }: { id?: string }) {
   );
 }
 
-/** Compact version for the success screen when the browser blocked the bonus tab. */
+/** Compact version for the success screen when the browser blocked the WhatsApp tab. */
 export function BonusBanner() {
   return (
     <div className="mt-6 rounded-xl border-2 border-gold bg-secondary p-5 text-left">
